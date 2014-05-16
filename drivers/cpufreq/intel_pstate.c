@@ -54,10 +54,11 @@ static inline int32_t div_fp(int32_t x, int32_t y)
 }
 
 struct sample {
-	int32_t core_pct_busy;
+	unsigned int core_pct_busy;
+	unsigned int duration_us;
+	unsigned int idletime_us;
 	u64 aperf;
 	u64 mperf;
-	unsigned long long tsc;
 	int freq;
 };
 
@@ -75,16 +76,6 @@ struct vid_data {
 	int32_t ratio;
 };
 
-struct _pid {
-	int setpoint;
-	int32_t integral;
-	int32_t p_gain;
-	int32_t i_gain;
-	int32_t d_gain;
-	int deadband;
-	int32_t last_err;
-};
-
 struct cpudata {
 	int cpu;
 
@@ -94,22 +85,17 @@ struct cpudata {
 
 	struct pstate_data pstate;
 	struct vid_data vid;
-	struct _pid pid;
 
+	ktime_t prev_sample;
+	u64	prev_idle_time_us;
 	u64	prev_aperf;
 	u64	prev_mperf;
-	unsigned long long prev_tsc;
 	struct sample sample;
 };
 
 static struct cpudata **all_cpu_data;
 struct pstate_adjust_policy {
 	int sample_rate_ms;
-	int deadband;
-	int setpoint;
-	int p_gain_pct;
-	int d_gain_pct;
-	int i_gain_pct;
 };
 
 struct pstate_funcs {
@@ -148,87 +134,10 @@ static struct perf_limits limits = {
 	.max_sysfs_pct = 100,
 };
 
-static inline void pid_reset(struct _pid *pid, int setpoint, int busy,
-			int deadband, int integral) {
-	pid->setpoint = setpoint;
-	pid->deadband  = deadband;
-	pid->integral  = int_tofp(integral);
-	pid->last_err  = int_tofp(setpoint) - int_tofp(busy);
-}
-
-static inline void pid_p_gain_set(struct _pid *pid, int percent)
-{
-	pid->p_gain = div_fp(int_tofp(percent), int_tofp(100));
-}
-
-static inline void pid_i_gain_set(struct _pid *pid, int percent)
-{
-	pid->i_gain = div_fp(int_tofp(percent), int_tofp(100));
-}
-
-static inline void pid_d_gain_set(struct _pid *pid, int percent)
-{
-
-	pid->d_gain = div_fp(int_tofp(percent), int_tofp(100));
-}
-
-static signed int pid_calc(struct _pid *pid, int32_t busy)
-{
-	signed int result;
-	int32_t pterm, dterm, fp_error;
-	int32_t integral_limit;
-
-	fp_error = int_tofp(pid->setpoint) - busy;
-
-	if (abs(fp_error) <= int_tofp(pid->deadband))
-		return 0;
-
-	pterm = mul_fp(pid->p_gain, fp_error);
-
-	pid->integral += fp_error;
-
-	/* limit the integral term */
-	integral_limit = int_tofp(30);
-	if (pid->integral > integral_limit)
-		pid->integral = integral_limit;
-	if (pid->integral < -integral_limit)
-		pid->integral = -integral_limit;
-
-	dterm = mul_fp(pid->d_gain, fp_error - pid->last_err);
-	pid->last_err = fp_error;
-
-	result = pterm + mul_fp(pid->integral, pid->i_gain) + dterm;
-
-	return (signed int)fp_toint(result);
-}
-
-static inline void intel_pstate_busy_pid_reset(struct cpudata *cpu)
-{
-	pid_p_gain_set(&cpu->pid, pid_params.p_gain_pct);
-	pid_d_gain_set(&cpu->pid, pid_params.d_gain_pct);
-	pid_i_gain_set(&cpu->pid, pid_params.i_gain_pct);
-
-	pid_reset(&cpu->pid,
-		pid_params.setpoint,
-		100,
-		pid_params.deadband,
-		0);
-}
-
-static inline void intel_pstate_reset_all_pid(void)
-{
-	unsigned int cpu;
-	for_each_online_cpu(cpu) {
-		if (all_cpu_data[cpu])
-			intel_pstate_busy_pid_reset(all_cpu_data[cpu]);
-	}
-}
-
 /************************** debugfs begin ************************/
 static int pid_param_set(void *data, u64 val)
 {
 	*(u32 *)data = val;
-	intel_pstate_reset_all_pid();
 	return 0;
 }
 static int pid_param_get(void *data, u64 *val)
@@ -246,11 +155,6 @@ struct pid_param {
 
 static struct pid_param pid_files[] = {
 	{"sample_rate_ms", &pid_params.sample_rate_ms},
-	{"d_gain_pct", &pid_params.d_gain_pct},
-	{"i_gain_pct", &pid_params.i_gain_pct},
-	{"deadband", &pid_params.deadband},
-	{"setpoint", &pid_params.setpoint},
-	{"p_gain_pct", &pid_params.p_gain_pct},
 	{NULL, NULL}
 };
 
@@ -459,11 +363,6 @@ static void core_set_pstate(struct cpudata *cpudata, int pstate)
 static struct cpu_defaults core_params = {
 	.pid_policy = {
 		.sample_rate_ms = 10,
-		.deadband = 0,
-		.setpoint = 97,
-		.p_gain_pct = 20,
-		.d_gain_pct = 0,
-		.i_gain_pct = 0,
 	},
 	.funcs = {
 		.get_max = core_get_max_pstate,
@@ -476,11 +375,6 @@ static struct cpu_defaults core_params = {
 static struct cpu_defaults byt_params = {
 	.pid_policy = {
 		.sample_rate_ms = 10,
-		.deadband = 0,
-		.setpoint = 97,
-		.p_gain_pct = 14,
-		.d_gain_pct = 0,
-		.i_gain_pct = 4,
 	},
 	.funcs = {
 		.get_max = byt_get_max_pstate,
@@ -527,21 +421,6 @@ static void intel_pstate_set_pstate(struct cpudata *cpu, int pstate)
 	pstate_funcs.set(cpu, pstate);
 }
 
-static inline void intel_pstate_pstate_increase(struct cpudata *cpu, int steps)
-{
-	int target;
-	target = cpu->pstate.current_pstate + steps;
-
-	intel_pstate_set_pstate(cpu, target);
-}
-
-static inline void intel_pstate_pstate_decrease(struct cpudata *cpu, int steps)
-{
-	int target;
-	target = cpu->pstate.current_pstate - steps;
-	intel_pstate_set_pstate(cpu, target);
-}
-
 static void intel_pstate_get_cpu_pstates(struct cpudata *cpu)
 {
 	sprintf(cpu->name, "Intel 2nd generation core");
@@ -559,45 +438,51 @@ static inline void intel_pstate_calc_busy(struct cpudata *cpu)
 {
 	struct sample *sample = &cpu->sample;
 	int32_t core_pct;
-	int32_t c0_pct;
+
+	sample->core_pct_busy = 100 *
+				(sample->duration_us - sample->idletime_us) /
+				sample->duration_us;
 
 	core_pct = div_fp(int_tofp(sample->aperf), int_tofp(sample->mperf));
 	core_pct = mul_fp(core_pct, int_tofp(100));
 	FP_ROUNDUP(core_pct);
 
-	c0_pct = div_fp(int_tofp(sample->mperf), int_tofp(sample->tsc));
-
 	sample->freq = fp_toint(
 		mul_fp(int_tofp(cpu->pstate.max_pstate * 1000), core_pct));
 
-	sample->core_pct_busy = mul_fp(core_pct, c0_pct);
+	pr_debug("%s: core_pct_busy = %u", __func__, sample->core_pct_busy);
 }
 
 static inline void intel_pstate_sample(struct cpudata *cpu)
 {
+	ktime_t now;
+	u64 idle_time_us;
 	u64 aperf, mperf;
-	unsigned long long tsc;
+
+	now = ktime_get();
+	idle_time_us = get_cpu_idle_time_us(cpu->cpu, NULL);
 
 	rdmsrl(MSR_IA32_APERF, aperf);
 	rdmsrl(MSR_IA32_MPERF, mperf);
-	tsc = native_read_tsc();
 
 	aperf = aperf >> FRAC_BITS;
 	mperf = mperf >> FRAC_BITS;
-	tsc = tsc >> FRAC_BITS;
 
 	cpu->sample.aperf = aperf;
 	cpu->sample.mperf = mperf;
-	cpu->sample.tsc = tsc;
 	cpu->sample.aperf -= cpu->prev_aperf;
 	cpu->sample.mperf -= cpu->prev_mperf;
-	cpu->sample.tsc -= cpu->prev_tsc;
+	cpu->sample.duration_us = (unsigned int)ktime_us_delta(now,
+							cpu->prev_sample);
+	cpu->sample.idletime_us = (unsigned int)(idle_time_us -
+						 cpu->prev_idle_time_us);
 
 	intel_pstate_calc_busy(cpu);
 
+	cpu->prev_sample = now;
+	cpu->prev_idle_time_us = idle_time_us;
 	cpu->prev_aperf = aperf;
 	cpu->prev_mperf = mperf;
-	cpu->prev_tsc = tsc;
 }
 
 static inline void intel_pstate_set_sample_time(struct cpudata *cpu)
@@ -609,35 +494,21 @@ static inline void intel_pstate_set_sample_time(struct cpudata *cpu)
 	mod_timer_pinned(&cpu->timer, jiffies + delay);
 }
 
-static inline int32_t intel_pstate_get_scaled_busy(struct cpudata *cpu)
-{
-	int32_t core_busy, max_pstate, current_pstate;
-
-	core_busy = cpu->sample.core_pct_busy;
-	max_pstate = int_tofp(cpu->pstate.max_pstate);
-	current_pstate = int_tofp(cpu->pstate.current_pstate);
-	core_busy = mul_fp(core_busy, div_fp(max_pstate, current_pstate));
-	return FP_ROUNDUP(core_busy);
-}
-
 static inline void intel_pstate_adjust_busy_pstate(struct cpudata *cpu)
 {
-	int32_t busy_scaled;
-	struct _pid *pid;
-	signed int ctl = 0;
-	int steps;
+	int max_pstate, min_pstate, pstate;
+	unsigned int busy;
 
-	pid = &cpu->pid;
-	busy_scaled = intel_pstate_get_scaled_busy(cpu);
+	busy = cpu->sample.core_pct_busy;
+	max_pstate = limits.no_turbo ? cpu->pstate.max_pstate :
+				       cpu->pstate.turbo_pstate;
+	min_pstate = cpu->pstate.min_pstate;
 
-	ctl = pid_calc(pid, busy_scaled);
+	pstate = min_pstate + (max_pstate - min_pstate) * busy / 100;
 
-	steps = abs(ctl);
+	intel_pstate_set_pstate(cpu, pstate);
 
-	if (ctl < 0)
-		intel_pstate_pstate_increase(cpu, steps);
-	else
-		intel_pstate_pstate_decrease(cpu, steps);
+	pr_debug("%s, busy = %u, pstate = %u", __func__, busy, pstate);
 }
 
 static void intel_pstate_timer_func(unsigned long __data)
@@ -652,7 +523,7 @@ static void intel_pstate_timer_func(unsigned long __data)
 	intel_pstate_adjust_busy_pstate(cpu);
 
 	trace_pstate_sample(fp_toint(sample->core_pct_busy),
-			fp_toint(intel_pstate_get_scaled_busy(cpu)),
+			0,
 			cpu->pstate.current_pstate,
 			sample->mperf,
 			sample->aperf,
@@ -707,8 +578,8 @@ static int intel_pstate_init_cpu(unsigned int cpunum)
 	cpu->timer.data =
 		(unsigned long)cpu;
 	cpu->timer.expires = jiffies + HZ/100;
-	intel_pstate_busy_pid_reset(cpu);
 	intel_pstate_sample(cpu);
+	intel_pstate_set_pstate(cpu, cpu->pstate.max_pstate);
 
 	add_timer_on(&cpu->timer, cpunum);
 
@@ -850,11 +721,6 @@ static int intel_pstate_msrs_not_valid(void)
 static void copy_pid_params(struct pstate_adjust_policy *policy)
 {
 	pid_params.sample_rate_ms = policy->sample_rate_ms;
-	pid_params.p_gain_pct = policy->p_gain_pct;
-	pid_params.i_gain_pct = policy->i_gain_pct;
-	pid_params.d_gain_pct = policy->d_gain_pct;
-	pid_params.deadband = policy->deadband;
-	pid_params.setpoint = policy->setpoint;
 }
 
 static void copy_cpu_funcs(struct pstate_funcs *funcs)
