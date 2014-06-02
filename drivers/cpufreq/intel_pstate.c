@@ -55,6 +55,7 @@ static inline int32_t div_fp(int32_t x, int32_t y)
 
 struct sample {
 	int32_t core_pct_busy;
+	int32_t busy_scaled;
 	u64 aperf;
 	u64 mperf;
 	int freq;
@@ -604,7 +605,7 @@ static inline void intel_pstate_set_sample_time(struct cpudata *cpu)
 	mod_timer_pinned(&cpu->timer, jiffies + delay);
 }
 
-static inline int32_t intel_pstate_get_scaled_busy(struct cpudata *cpu)
+static inline void intel_pstate_calc_scaled_busy(struct cpudata *cpu)
 {
 	int32_t core_busy, max_pstate, current_pstate, sample_ratio;
 	u32 duration_us;
@@ -624,20 +625,19 @@ static inline int32_t intel_pstate_get_scaled_busy(struct cpudata *cpu)
 		core_busy = mul_fp(core_busy, sample_ratio);
 	}
 
-	return core_busy;
+	cpu->sample.busy_scaled = core_busy;
 }
 
 static inline void intel_pstate_adjust_busy_pstate(struct cpudata *cpu)
 {
-	int32_t busy_scaled;
 	struct _pid *pid;
 	signed int ctl = 0;
 	int steps;
 
 	pid = &cpu->pid;
-	busy_scaled = intel_pstate_get_scaled_busy(cpu);
+	intel_pstate_calc_scaled_busy(cpu);
 
-	ctl = pid_calc(pid, busy_scaled);
+	ctl = pid_calc(pid, cpu->sample.busy_scaled);
 
 	steps = abs(ctl);
 
@@ -659,7 +659,7 @@ static void intel_pstate_timer_func(unsigned long __data)
 	intel_pstate_adjust_busy_pstate(cpu);
 
 	trace_pstate_sample(fp_toint(sample->core_pct_busy),
-			fp_toint(intel_pstate_get_scaled_busy(cpu)),
+			fp_toint(sample->busy_scaled),
 			cpu->pstate.current_pstate,
 			sample->mperf,
 			sample->aperf,
