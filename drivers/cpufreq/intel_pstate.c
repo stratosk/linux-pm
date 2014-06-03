@@ -86,6 +86,12 @@ struct _pid {
 	int32_t last_err;
 };
 
+struct pstate_stat {
+	int pstate;
+	u64 time;
+	unsigned int count;
+};
+
 struct cpudata {
 	int cpu;
 
@@ -99,6 +105,7 @@ struct cpudata {
 	u64	prev_aperf;
 	u64	prev_mperf;
 	struct sample sample;
+	struct pstate_stat *stats;
 };
 
 static struct cpudata **all_cpu_data;
@@ -256,9 +263,57 @@ static struct pid_param pid_files[] = {
 	{NULL, NULL}
 };
 
-static struct dentry *debugfs_parent;
+static inline unsigned int stats_state_index(struct cpudata *cpu, int pstate)
+{
+	if (pstate <= cpu->pstate.max_pstate)
+		return pstate - cpu->pstate.min_pstate;
+	else
+		return cpu->pstate.max_pstate - cpu->pstate.min_pstate + 1;
+}
+
+static int stats_debug_show(struct seq_file *m, void *unused)
+{
+	struct cpudata *cpu;
+	int i, j, cnt;
+
+	get_online_cpus();
+	for_each_online_cpu(i) {
+		if (all_cpu_data[i])
+			cpu = all_cpu_data[i];
+		else
+			continue;
+
+		seq_printf(m, "CPU%u\n", i);
+		seq_puts(m, "P-state        Time     Count\n");
+
+		cnt = cpu->pstate.max_pstate - cpu->pstate.min_pstate + 2;
+		for (j = 0; j < cnt; j++)
+			seq_printf(m, "%7u %11llu %9u\n", cpu->stats[j].pstate,
+				   cpu->stats[j].time, cpu->stats[j].count);
+
+		seq_puts(m, "\n");
+	}
+	put_online_cpus();
+
+	return 0;
+}
+
+static int stats_debug_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, stats_debug_show, inode->i_private);
+}
+
+static const struct file_operations fops_stats_pstate = {
+	.open		= stats_debug_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+	.owner		= THIS_MODULE,
+};
+
 static void intel_pstate_debug_expose_params(void)
 {
+	struct dentry *debugfs_parent;
 	int i = 0;
 
 	debugfs_parent = debugfs_create_dir("pstate_snb", NULL);
@@ -270,6 +325,8 @@ static void intel_pstate_debug_expose_params(void)
 				&fops_pid_param);
 		i++;
 	}
+	debugfs_create_file("stats", S_IRUSR | S_IRGRP, debugfs_parent, NULL,
+			    &fops_stats_pstate);
 }
 
 /************************** debugfs end ************************/
@@ -610,6 +667,7 @@ static inline void intel_pstate_calc_scaled_busy(struct cpudata *cpu)
 	int32_t core_busy, max_pstate, current_pstate, sample_ratio;
 	u32 duration_us;
 	u32 sample_time;
+	unsigned int i;
 
 	core_busy = cpu->sample.core_pct_busy;
 	max_pstate = int_tofp(cpu->pstate.max_pstate);
@@ -626,6 +684,10 @@ static inline void intel_pstate_calc_scaled_busy(struct cpudata *cpu)
 	}
 
 	cpu->sample.busy_scaled = core_busy;
+
+	i = stats_state_index(cpu, cpu->pstate.current_pstate);
+	cpu->stats[i].time += duration_us / USEC_PER_MSEC;
+	cpu->stats[i].count++;
 }
 
 static inline void intel_pstate_adjust_busy_pstate(struct cpudata *cpu)
@@ -692,6 +754,7 @@ MODULE_DEVICE_TABLE(x86cpu, intel_pstate_cpu_ids);
 static int intel_pstate_init_cpu(unsigned int cpunum)
 {
 	struct cpudata *cpu;
+	unsigned int i, cnt;
 
 	all_cpu_data[cpunum] = kzalloc(sizeof(struct cpudata), GFP_KERNEL);
 	if (!all_cpu_data[cpunum])
@@ -700,6 +763,17 @@ static int intel_pstate_init_cpu(unsigned int cpunum)
 	cpu = all_cpu_data[cpunum];
 
 	intel_pstate_get_cpu_pstates(cpu);
+
+	/* cnt equals to number of p-states + 1 (for turbo p-state) */
+	cnt = cpu->pstate.max_pstate - cpu->pstate.min_pstate + 2;
+	cpu->stats = kzalloc(sizeof(*cpu->stats) * cnt, GFP_KERNEL);
+	if (!cpu->stats) {
+		kfree(all_cpu_data[cpunum]);
+		return -ENOMEM;
+	}
+	for (i = 0; i < cnt - 1; i++)
+		cpu->stats[i].pstate = cpu->pstate.min_pstate + i;
+	cpu->stats[cnt - 1].pstate = cpu->pstate.turbo_pstate;
 
 	cpu->cpu = cpunum;
 
@@ -779,6 +853,7 @@ static void intel_pstate_stop_cpu(struct cpufreq_policy *policy)
 
 	del_timer_sync(&all_cpu_data[cpu_num]->timer);
 	intel_pstate_set_pstate(cpu, cpu->pstate.min_pstate);
+	kfree(all_cpu_data[cpu_num]->stats);
 	kfree(all_cpu_data[cpu_num]);
 	all_cpu_data[cpu_num] = NULL;
 }
@@ -980,6 +1055,7 @@ out:
 	for_each_online_cpu(cpu) {
 		if (all_cpu_data[cpu]) {
 			del_timer_sync(&all_cpu_data[cpu]->timer);
+			kfree(all_cpu_data[cpu]->stats);
 			kfree(all_cpu_data[cpu]);
 		}
 	}
