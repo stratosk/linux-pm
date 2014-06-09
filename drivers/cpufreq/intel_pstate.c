@@ -10,26 +10,13 @@
  * of the License.
  */
 
-#include <linux/kernel.h>
-#include <linux/kernel_stat.h>
-#include <linux/module.h>
-#include <linux/ktime.h>
-#include <linux/hrtimer.h>
-#include <linux/tick.h>
-#include <linux/slab.h>
-#include <linux/sched.h>
-#include <linux/list.h>
+#include <linux/acpi.h>
 #include <linux/cpu.h>
 #include <linux/cpufreq.h>
-#include <linux/sysfs.h>
-#include <linux/types.h>
-#include <linux/fs.h>
 #include <linux/debugfs.h>
-#include <linux/acpi.h>
+#include <linux/module.h>
 #include <trace/events/power.h>
 
-#include <asm/div64.h>
-#include <asm/msr.h>
 #include <asm/cpu_device_id.h>
 
 #define BYT_RATIOS		0x66a
