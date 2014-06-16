@@ -529,21 +529,6 @@ static void intel_pstate_set_pstate(struct cpudata *cpu, int pstate)
 	pstate_funcs.set(cpu, pstate);
 }
 
-static inline void intel_pstate_pstate_increase(struct cpudata *cpu, int steps)
-{
-	int target;
-	target = cpu->pstate.current_pstate + steps;
-
-	intel_pstate_set_pstate(cpu, target);
-}
-
-static inline void intel_pstate_pstate_decrease(struct cpudata *cpu, int steps)
-{
-	int target;
-	target = cpu->pstate.current_pstate - steps;
-	intel_pstate_set_pstate(cpu, target);
-}
-
 static void intel_pstate_get_cpu_pstates(struct cpudata *cpu)
 {
 	cpu->pstate.min_pstate = pstate_funcs.get_min();
@@ -633,7 +618,6 @@ static inline void intel_pstate_adjust_busy_pstate(struct cpudata *cpu)
 	int32_t busy_scaled;
 	struct _pid *pid;
 	signed int ctl;
-	int steps;
 	int from;
 	struct sample *sample;
 
@@ -644,12 +628,8 @@ static inline void intel_pstate_adjust_busy_pstate(struct cpudata *cpu)
 
 	ctl = pid_calc(pid, busy_scaled);
 
-	steps = abs(ctl);
-
-	if (ctl < 0)
-		intel_pstate_pstate_increase(cpu, steps);
-	else
-		intel_pstate_pstate_decrease(cpu, steps);
+	/* Negative values of ctl increase the pstate and vice versa */
+	intel_pstate_set_pstate(cpu, cpu->pstate.current_pstate - ctl);
 
 	sample = &cpu->sample;
 	trace_pstate_sample(fp_toint(sample->core_pct_busy),
