@@ -42,7 +42,8 @@ TRACE_EVENT(pstate_sample,
 
 	TP_PROTO(u32 core_busy,
 		u32 scaled_busy,
-		u32 state,
+		u32 from,
+		u32 to,
 		u64 mperf,
 		u64 aperf,
 		u32 freq
@@ -50,7 +51,8 @@ TRACE_EVENT(pstate_sample,
 
 	TP_ARGS(core_busy,
 		scaled_busy,
-		state,
+		from,
+		to,
 		mperf,
 		aperf,
 		freq
@@ -59,7 +61,8 @@ TRACE_EVENT(pstate_sample,
 	TP_STRUCT__entry(
 		__field(u32, core_busy)
 		__field(u32, scaled_busy)
-		__field(u32, state)
+		__field(u32, from)
+		__field(u32, to)
 		__field(u64, mperf)
 		__field(u64, aperf)
 		__field(u32, freq)
@@ -69,16 +72,18 @@ TRACE_EVENT(pstate_sample,
 	TP_fast_assign(
 		__entry->core_busy = core_busy;
 		__entry->scaled_busy = scaled_busy;
-		__entry->state = state;
+		__entry->from = from;
+		__entry->to = to;
 		__entry->mperf = mperf;
 		__entry->aperf = aperf;
 		__entry->freq = freq;
 		),
 
-	TP_printk("core_busy=%lu scaled=%lu state=%lu mperf=%llu aperf=%llu freq=%lu ",
+	TP_printk("core_busy=%lu scaled=%lu from=%lu to=%lu mperf=%llu aperf=%llu freq=%lu ",
 		(unsigned long)__entry->core_busy,
 		(unsigned long)__entry->scaled_busy,
-		(unsigned long)__entry->state,
+		(unsigned long)__entry->from,
+		(unsigned long)__entry->to,
 		(unsigned long long)__entry->mperf,
 		(unsigned long long)__entry->aperf,
 		(unsigned long)__entry->freq
