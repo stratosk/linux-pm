@@ -557,7 +557,7 @@ static inline void intel_pstate_calc_busy(struct cpudata *cpu)
 	int64_t core_pct;
 
 	core_pct = int_tofp(sample->aperf) * int_tofp(100);
-	core_pct = div_u64(core_pct, int_tofp(sample->mperf));
+	core_pct = div64_u64(core_pct, int_tofp(sample->mperf));
 
 	sample->freq = fp_toint(
 		mul_fp(int_tofp(cpu->pstate.max_pstate * 1000), core_pct));
@@ -571,9 +571,6 @@ static inline void intel_pstate_sample(struct cpudata *cpu)
 
 	rdmsrl(MSR_IA32_APERF, aperf);
 	rdmsrl(MSR_IA32_MPERF, mperf);
-
-	aperf = aperf >> FRAC_BITS;
-	mperf = mperf >> FRAC_BITS;
 
 	cpu->last_sample_time = cpu->sample.time;
 	cpu->sample.time = ktime_get();
